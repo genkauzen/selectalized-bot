@@ -1,0 +1,14 @@
+# Telegram bot framework
+aiogram==3.17.0
+
+# Async HTTP client (Telegram + Selectel API)
+aiohttp==3.11.18
+
+# SOCKS5 proxy support for aiohttp (used by both Telegram and Selectel)
+aiohttp-socks==0.10.1
+
+# Async SQLite — stores accounts, found IPs, bot state
+aiosqlite==0.21.0
+
+# Environment variable loading from .env
+python-dotenv==1.1.0
