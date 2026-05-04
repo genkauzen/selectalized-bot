@@ -36,6 +36,7 @@ class SelectelApiError(Exception):
         self.status = status
         self.body = body
         self.is_rate_limit = is_rate_limit
+        self.is_permanent = status in (401, 403, 404)
         super().__init__(f"HTTP {status}: {body[:300]}")
 
 
@@ -193,9 +194,29 @@ class SelectelAccount:
 
     # ------------------------------------------------------------------ floating IPs
 
-    async def create_floatingip(self, region: str) -> Tuple[str, str]:
+    async def list_subnets(self, region: str) -> List[Dict]:
+        """List subnets of the external network in the given region."""
+        token = await self._get_token()
+        ext_net = await self._external_network(region)
+        base = neutron_url(region)
+
+        async with _make_session() as session:
+            async with session.get(
+                f"{base}/v2.0/subnets",
+                params={"network_id": ext_net},
+                headers={"X-Auth-Token": token},
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                await _raise_for(resp)
+                body = await resp.json()
+                return body.get("subnets", [])
+
+    async def create_floatingip(
+        self, region: str, ip_address: Optional[str] = None
+    ) -> Tuple[str, str]:
         """
-        Allocate a new floating IPv4 in the given region.
+        Allocate a floating IPv4 in the given region.
+        If ip_address is given, request that specific IP.
 
         Returns:
             (ip_address, floatip_id)
@@ -204,10 +225,14 @@ class SelectelAccount:
         ext_net = await self._external_network(region)
         base = neutron_url(region)
 
+        fip_body: Dict = {"floating_network_id": ext_net}
+        if ip_address:
+            fip_body["floating_ip_address"] = ip_address
+
         async with _make_session() as session:
             async with session.post(
                 f"{base}/v2.0/floatingips",
-                json={"floatingip": {"floating_network_id": ext_net}},
+                json={"floatingip": fip_body},
                 headers={"X-Auth-Token": token},
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:

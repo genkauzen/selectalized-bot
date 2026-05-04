@@ -1,5 +1,5 @@
 import ipaddress
-from typing import List, Optional
+from typing import Dict, Iterator, List, Optional
 
 # Whitelist subnets — floating IPs in these ranges are considered "good"
 WHITELIST_CIDRS: List[str] = [
@@ -40,6 +40,27 @@ def ip_in_whitelist(ip_str: str) -> bool:
         return any(addr in net for net in _NETWORKS)
     except ValueError:
         return False
+
+
+def whitelist_ips_in_pools(pools: List[Dict]) -> Iterator[str]:
+    """
+    Yield IP address strings that fall inside both the given allocation
+    pools and the whitelist.  pools is the Neutron subnet allocation_pools
+    list: [{"start": "x.x.x.x", "end": "x.x.x.x"}, ...].
+    """
+    for pool in pools:
+        try:
+            p_start = int(ipaddress.ip_address(pool["start"]))
+            p_end = int(ipaddress.ip_address(pool["end"]))
+        except (KeyError, ValueError):
+            continue
+        for wnet in _NETWORKS:
+            w_start = int(wnet.network_address)
+            w_end = int(wnet.broadcast_address)
+            i_start = max(p_start, w_start)
+            i_end = min(p_end, w_end)
+            for ip_int in range(i_start, i_end + 1):
+                yield str(ipaddress.ip_address(ip_int))
 
 
 def get_matching_subnet(ip_str: str) -> Optional[str]:
