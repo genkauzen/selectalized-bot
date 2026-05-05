@@ -83,7 +83,7 @@ async def _try_region(acc: SelectelAccount, region: str) -> None:
         if exc.is_rate_limit:
             await notify.live(
                 f"⏳ [{code(short_time())}] {bold(acc.name)} "
-                f"[{code(region)}] — rate limit, пауза {code(f'{RATE_LIMIT_RETRY_SEC // 60} мин')}"
+                f"[{code(region)}] — rate limit (HTTP {exc.status}), пауза {code(f'{RATE_LIMIT_RETRY_SEC // 60} мин')}"
             )
             await asyncio.sleep(RATE_LIMIT_RETRY_SEC)
         elif exc.is_permanent:
@@ -94,9 +94,8 @@ async def _try_region(acc: SelectelAccount, region: str) -> None:
         else:
             await notify.live(
                 f"❌ [{code(short_time())}] {bold(acc.name)} "
-                f"[{code(region)}] — HTTP {exc.status}, жду {code(f'{ERROR_RETRY_SEC} с')}"
+                f"[{code(region)}] — HTTP {exc.status}, пропускаю"
             )
-            await asyncio.sleep(ERROR_RETRY_SEC)
 
     except asyncio.CancelledError:
         if floatip_id:
@@ -114,9 +113,8 @@ async def _try_region(acc: SelectelAccount, region: str) -> None:
                 pass
         await notify.live(
             f"❌ [{code(short_time())}] {bold(acc.name)} "
-            f"[{code(region)}] — {esc(str(exc)[:120])}, жду {code(f'{ERROR_RETRY_SEC} с')}"
+            f"[{code(region)}] — {esc(str(exc)[:120])}, пропускаю"
         )
-        await asyncio.sleep(ERROR_RETRY_SEC)
 
 
 # ─────────────────────────────────────────── per-account coroutine

@@ -61,7 +61,7 @@ async def _raise_for(resp: aiohttp.ClientResponse) -> None:
     raise SelectelApiError(
         resp.status,
         body,
-        is_rate_limit=resp.status in (429, 503),
+        is_rate_limit=resp.status in (429, 503, 529),
     )
 
 
