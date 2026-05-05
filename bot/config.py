@@ -32,7 +32,7 @@ def _str(key: str, default: str = "") -> str:
 def _regions(key: str) -> List[str]:
     raw = os.getenv(key, "").strip()
     if not raw:
-        return ["ru-2", "ru-3"]
+        return ["ru-1", "ru-2", "ru-3", "ru-7", "ru-9"]
     parts = []
     for chunk in raw.replace(",", " ").split():
         chunk = chunk.strip()

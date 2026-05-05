@@ -57,6 +57,29 @@ async def _try_account(acc_data: Dict, regions: List[str]) -> None:
             )
             return
 
+    # Pre-authenticate to discover available regions from catalog
+    try:
+        await acc._get_token()
+    except SelectelApiError as exc:
+        await notify.live(
+            f"⛔ [{code(short_time())}] {bold(acc.name)} — "
+            f"ошибка авторизации (HTTP {exc.status}), пропускаю"
+        )
+        return
+
+    catalog_regions = acc.available_regions()
+    if catalog_regions:
+        skipped = [r for r in regions if r not in catalog_regions]
+        if skipped:
+            await notify.live(
+                f"ℹ️ [{code(short_time())}] {bold(acc.name)} — "
+                f"регионы {code(', '.join(skipped))} отсутствуют в каталоге, пропускаю. "
+                f"Доступны: {code(', '.join(catalog_regions))}"
+            )
+        regions = [r for r in regions if r in catalog_regions]
+        if not regions:
+            return
+
     for region in regions:
         if not await db.is_running():
             return

@@ -96,6 +96,7 @@ class SelectelAccount:
         self._token: Optional[str] = None
         self._token_ts: float = 0.0
         self._ext_nets: Dict[str, str] = {}   # region → external-network UUID
+        self._neutron_endpoints: Dict[str, str] = {}  # region → base URL from catalog
 
     @property
     def has_full_creds(self) -> bool:
@@ -138,6 +139,29 @@ class SelectelAccount:
                     raise SelectelApiError(0, "X-Subject-Token missing in auth response")
                 self._token = token
                 self._token_ts = now
+
+                # Parse service catalog to discover Neutron endpoints per region
+                try:
+                    body = await resp.json()
+                    catalog = body.get("token", {}).get("catalog", [])
+                    for svc in catalog:
+                        if svc.get("type") != "network":
+                            continue
+                        for ep in svc.get("endpoints", []):
+                            if ep.get("interface") == "public":
+                                region = ep.get("region_id") or ep.get("region", "")
+                                url = ep.get("url", "").rstrip("/")
+                                if region and url:
+                                    self._neutron_endpoints[region] = url
+                    if self._neutron_endpoints:
+                        logger.info(
+                            "Account %s: discovered neutron endpoints: %s",
+                            self.name,
+                            list(self._neutron_endpoints.keys()),
+                        )
+                except Exception as exc:
+                    logger.warning("Failed to parse service catalog: %s", exc)
+
                 return token
 
     # ------------------------------------------------------------------ billing
@@ -168,6 +192,18 @@ class SelectelAccount:
             logger.debug("get_balance error for %s: %s", self.name, exc)
             return 0.0
 
+    # ------------------------------------------------------------------ endpoints
+
+    def _neutron_base(self, region: str) -> str:
+        """Return the Neutron base URL for the region (from catalog or fallback)."""
+        if region in self._neutron_endpoints:
+            return self._neutron_endpoints[region]
+        return neutron_url(region)
+
+    def available_regions(self) -> List[str]:
+        """Return regions discovered from the Keystone service catalog."""
+        return list(self._neutron_endpoints.keys())
+
     # ------------------------------------------------------------------ networks
 
     async def _external_network(self, region: str) -> str:
@@ -175,7 +211,7 @@ class SelectelAccount:
             return self._ext_nets[region]
 
         token = await self._get_token()
-        base = neutron_url(region)
+        base = self._neutron_base(region)
 
         async with _make_session() as session:
             async with session.get(
@@ -198,7 +234,7 @@ class SelectelAccount:
         """List subnets of the external network in the given region."""
         token = await self._get_token()
         ext_net = await self._external_network(region)
-        base = neutron_url(region)
+        base = self._neutron_base(region)
 
         async with _make_session() as session:
             async with session.get(
@@ -223,7 +259,7 @@ class SelectelAccount:
         """
         token = await self._get_token()
         ext_net = await self._external_network(region)
-        base = neutron_url(region)
+        base = self._neutron_base(region)
 
         fip_body: Dict = {"floating_network_id": ext_net}
         if ip_address:
@@ -244,7 +280,7 @@ class SelectelAccount:
     async def delete_floatingip(self, region: str, floatip_id: str) -> None:
         """Release a floating IP by its ID."""
         token = await self._get_token()
-        base = neutron_url(region)
+        base = self._neutron_base(region)
 
         async with _make_session() as session:
             async with session.delete(
@@ -259,7 +295,7 @@ class SelectelAccount:
     async def list_floatingips(self, region: str) -> List[Dict]:
         """Return all floating IPs allocated in the given region."""
         token = await self._get_token()
-        base = neutron_url(region)
+        base = self._neutron_base(region)
 
         async with _make_session() as session:
             async with session.get(
