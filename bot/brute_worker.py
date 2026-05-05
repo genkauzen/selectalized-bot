@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Dict, List, Optional
 
 from . import db, notify
@@ -24,6 +25,20 @@ from .tg_format import SEP, bold, code, esc, now_str, short_time
 logger = logging.getLogger(__name__)
 
 _worker_task: Optional[asyncio.Task] = None
+
+# Throttle notify.live spam: one message per key per interval
+_notify_ts: Dict[str, float] = {}
+MISS_THROTTLE = 30.0    # seconds between "мимо" logs per region
+ERROR_THROTTLE = 60.0   # seconds between error logs per region
+QUOTA_SLEEP = 10        # seconds to sleep after HTTP 400 (quota)
+
+
+def _can_notify(key: str, interval: float) -> bool:
+    now = time.monotonic()
+    if now - _notify_ts.get(key, 0.0) >= interval:
+        _notify_ts[key] = now
+        return True
+    return False
 
 
 # ─────────────────────────────────────────── per-region coroutine
@@ -74,28 +89,40 @@ async def _try_region(acc: SelectelAccount, region: str) -> None:
         else:
             await acc.delete_floatingip(region, floatip_id)
             floatip_id = None
-            await notify.live(
-                f"🔄 [{code(short_time())}] {bold(acc.name)} "
-                f"[{code(region)}] — {code(ip_addr)} мимо"
-            )
+            if _can_notify(f"{acc.name}:{region}:miss", MISS_THROTTLE):
+                await notify.live(
+                    f"🔄 [{code(short_time())}] {bold(acc.name)} "
+                    f"[{code(region)}] — {code(ip_addr)} мимо"
+                )
 
     except SelectelApiError as exc:
         if exc.is_rate_limit:
-            await notify.live(
-                f"⏳ [{code(short_time())}] {bold(acc.name)} "
-                f"[{code(region)}] — rate limit (HTTP {exc.status}), пауза {code(f'{RATE_LIMIT_RETRY_SEC} с')}"
-            )
+            if _can_notify(f"{acc.name}:{region}:ratelimit", RATE_LIMIT_RETRY_SEC):
+                await notify.live(
+                    f"⏳ [{code(short_time())}] {bold(acc.name)} "
+                    f"[{code(region)}] — rate limit (HTTP {exc.status}), пауза {code(f'{RATE_LIMIT_RETRY_SEC} с')}"
+                )
             await asyncio.sleep(RATE_LIMIT_RETRY_SEC)
+        elif exc.status == 400:
+            # Quota exceeded — stale cleanup runs at next iteration start
+            if _can_notify(f"{acc.name}:{region}:quota", ERROR_THROTTLE):
+                await notify.live(
+                    f"⚠️ [{code(short_time())}] {bold(acc.name)} "
+                    f"[{code(region)}] — квота (HTTP 400), жду {code(f'{QUOTA_SLEEP} с')}"
+                )
+            await asyncio.sleep(QUOTA_SLEEP)
         elif exc.is_permanent:
-            await notify.live(
-                f"⛔ [{code(short_time())}] {bold(acc.name)} "
-                f"[{code(region)}] — HTTP {exc.status}, пропускаю регион"
-            )
+            if _can_notify(f"{acc.name}:{region}:perm", ERROR_THROTTLE):
+                await notify.live(
+                    f"⛔ [{code(short_time())}] {bold(acc.name)} "
+                    f"[{code(region)}] — HTTP {exc.status}, пропускаю регион"
+                )
         else:
-            await notify.live(
-                f"❌ [{code(short_time())}] {bold(acc.name)} "
-                f"[{code(region)}] — HTTP {exc.status}, пропускаю"
-            )
+            if _can_notify(f"{acc.name}:{region}:err", ERROR_THROTTLE):
+                await notify.live(
+                    f"❌ [{code(short_time())}] {bold(acc.name)} "
+                    f"[{code(region)}] — HTTP {exc.status}, пропускаю"
+                )
 
     except asyncio.CancelledError:
         if floatip_id:
@@ -111,10 +138,12 @@ async def _try_region(acc: SelectelAccount, region: str) -> None:
                 await acc.delete_floatingip(region, floatip_id)
             except Exception:
                 pass
-        await notify.live(
-            f"❌ [{code(short_time())}] {bold(acc.name)} "
-            f"[{code(region)}] — {esc(str(exc)[:120])}, пропускаю"
-        )
+        err_text = str(exc) or f"{type(exc).__name__}"
+        if _can_notify(f"{acc.name}:{region}:exc", ERROR_THROTTLE):
+            await notify.live(
+                f"❌ [{code(short_time())}] {bold(acc.name)} "
+                f"[{code(region)}] — {esc(err_text[:120])}, пропускаю"
+            )
 
 
 # ─────────────────────────────────────────── per-account coroutine
