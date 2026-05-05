@@ -83,7 +83,7 @@ async def _try_region(acc: SelectelAccount, region: str) -> None:
         if exc.is_rate_limit:
             await notify.live(
                 f"⏳ [{code(short_time())}] {bold(acc.name)} "
-                f"[{code(region)}] — rate limit (HTTP {exc.status}), пауза {code(f'{RATE_LIMIT_RETRY_SEC // 60} мин')}"
+                f"[{code(region)}] — rate limit (HTTP {exc.status}), пауза {code(f'{RATE_LIMIT_RETRY_SEC} с')}"
             )
             await asyncio.sleep(RATE_LIMIT_RETRY_SEC)
         elif exc.is_permanent:
