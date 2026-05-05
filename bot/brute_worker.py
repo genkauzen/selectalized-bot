@@ -26,6 +26,99 @@ logger = logging.getLogger(__name__)
 _worker_task: Optional[asyncio.Task] = None
 
 
+# ─────────────────────────────────────────── per-region coroutine
+
+async def _try_region(acc: SelectelAccount, region: str) -> None:
+    """One iteration for a single account × region pair."""
+    if not await db.is_running():
+        return
+
+    # Зачищаем зависшие IP. При 400 (квота) — чистим и сразу пробуем снова.
+    floatip_id: Optional[str] = None
+    try:
+        existing = await acc.list_floatingips(region)
+        found_ids = {row["floatip_id"] for row in await db.get_found_ips(limit=10000)}
+        stale = [f for f in existing if f["id"] not in found_ids]
+        if stale:
+            await notify.live(
+                f"🧹 [{code(short_time())}] {bold(acc.name)} "
+                f"[{code(region)}] — удаляю {code(str(len(stale)))} зависших IP"
+            )
+            for fip in stale:
+                try:
+                    await acc.delete_floatingip(region, fip["id"])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        ip_addr, floatip_id = await acc.create_floatingip(region)
+
+        if ip_in_whitelist(ip_addr):
+            subnet = get_matching_subnet(ip_addr) or "?"
+            await notify.live(
+                f"✅ [{code(short_time())}] {bold(acc.name)} "
+                f"[{code(region)}] — {code(ip_addr)} → {code(subnet)}"
+            )
+            await notify.logs(
+                f"🎯 {bold('НАЙДЕН IP В WHITELIST!')}\n"
+                f"{SEP}\n"
+                f"Аккаунт : {code(acc.name)}\n"
+                f"Регион  : {code(region)}\n"
+                f"IP      : {code(ip_addr)}\n"
+                f"Подсеть : {code(subnet)}\n"
+                f"Время   : {code(now_str())}"
+            )
+            await db.add_found_ip(acc.name, region, ip_addr, floatip_id, subnet)
+        else:
+            await acc.delete_floatingip(region, floatip_id)
+            floatip_id = None
+            await notify.live(
+                f"🔄 [{code(short_time())}] {bold(acc.name)} "
+                f"[{code(region)}] — {code(ip_addr)} мимо"
+            )
+
+    except SelectelApiError as exc:
+        if exc.is_rate_limit:
+            await notify.live(
+                f"⏳ [{code(short_time())}] {bold(acc.name)} "
+                f"[{code(region)}] — rate limit, пауза {code(f'{RATE_LIMIT_RETRY_SEC // 60} мин')}"
+            )
+            await asyncio.sleep(RATE_LIMIT_RETRY_SEC)
+        elif exc.is_permanent:
+            await notify.live(
+                f"⛔ [{code(short_time())}] {bold(acc.name)} "
+                f"[{code(region)}] — HTTP {exc.status}, пропускаю регион"
+            )
+        else:
+            await notify.live(
+                f"❌ [{code(short_time())}] {bold(acc.name)} "
+                f"[{code(region)}] — HTTP {exc.status}, жду {code(f'{ERROR_RETRY_SEC} с')}"
+            )
+            await asyncio.sleep(ERROR_RETRY_SEC)
+
+    except asyncio.CancelledError:
+        if floatip_id:
+            try:
+                await acc.delete_floatingip(region, floatip_id)
+            except Exception:
+                pass
+        raise
+
+    except Exception as exc:
+        if floatip_id:
+            try:
+                await acc.delete_floatingip(region, floatip_id)
+            except Exception:
+                pass
+        await notify.live(
+            f"❌ [{code(short_time())}] {bold(acc.name)} "
+            f"[{code(region)}] — {esc(str(exc)[:120])}, жду {code(f'{ERROR_RETRY_SEC} с')}"
+        )
+        await asyncio.sleep(ERROR_RETRY_SEC)
+
+
 # ─────────────────────────────────────────── per-account coroutine
 
 async def _try_account(acc_data: Dict, regions: List[str]) -> None:
@@ -75,107 +168,12 @@ async def _try_account(acc_data: Dict, regions: List[str]) -> None:
         if not regions:
             return
 
-    for region in regions:
-        if not await db.is_running():
-            return
-
-        # Зачищаем зависшие floating IP перед созданием нового
-        try:
-            existing = await acc.list_floatingips(region)
-            # Не трогаем IP, которые уже сохранены в БД как найденные
-            found_ids = {row["floatip_id"] for row in await db.get_found_ips(limit=10000)}
-            stale = [f for f in existing if f["id"] not in found_ids]
-            if stale:
-                await notify.live(
-                    f"🧹 [{code(short_time())}] {bold(acc.name)} "
-                    f"[{code(region)}] — удаляю {code(str(len(stale)))} зависших IP"
-                )
-                for fip in stale:
-                    try:
-                        await acc.delete_floatingip(region, fip["id"])
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-        await notify.live(
-            f"🔍 [{code(short_time())}] {bold(acc.name)} "
-            f"[{code(region)}] — создаю случайный IP…"
-        )
-
-        floatip_id: Optional[str] = None
-        try:
-            ip_addr, floatip_id = await acc.create_floatingip(region)
-
-            if ip_in_whitelist(ip_addr):
-                subnet = get_matching_subnet(ip_addr) or "?"
-                await notify.live(
-                    f"✅ [{code(short_time())}] {bold(acc.name)} "
-                    f"[{code(region)}]\n"
-                    f"IP: {code(ip_addr)} → {code(subnet)}"
-                )
-                await notify.logs(
-                    f"🎯 {bold('НАЙДЕН IP В WHITELIST!')}\n"
-                    f"{SEP}\n"
-                    f"Аккаунт : {code(acc.name)}\n"
-                    f"Регион  : {code(region)}\n"
-                    f"IP      : {code(ip_addr)}\n"
-                    f"Подсеть : {code(subnet)}\n"
-                    f"Время   : {code(now_str())}"
-                )
-                await db.add_found_ip(acc.name, region, ip_addr, floatip_id, subnet)
-                return
-            else:
-                await notify.live(
-                    f"❌ [{code(short_time())}] {bold(acc.name)} "
-                    f"[{code(region)}] — {code(ip_addr)} не в whitelist, удаляю"
-                )
-                await acc.delete_floatingip(region, floatip_id)
-                floatip_id = None
-
-        except SelectelApiError as exc:
-            if exc.is_rate_limit:
-                wait = RATE_LIMIT_RETRY_SEC
-                await notify.live(
-                    f"⏳ [{code(short_time())}] {bold(acc.name)} "
-                    f"[{code(region)}] — rate limit, пауза "
-                    f"{code(f'{wait // 60} мин')}"
-                )
-                await asyncio.sleep(wait)
-                continue
-            if exc.is_permanent:
-                await notify.live(
-                    f"⛔ [{code(short_time())}] {bold(acc.name)} "
-                    f"[{code(region)}] — HTTP {exc.status}, пропускаю регион"
-                )
-                continue
-            await notify.live(
-                f"❌ [{code(short_time())}] {bold(acc.name)} "
-                f"[{code(region)}] — HTTP {exc.status}, "
-                f"жду {code(f'{ERROR_RETRY_SEC} с')}"
-            )
-            await asyncio.sleep(ERROR_RETRY_SEC)
-
-        except asyncio.CancelledError:
-            if floatip_id:
-                try:
-                    await acc.delete_floatingip(region, floatip_id)
-                except Exception:
-                    pass
-            raise
-
-        except Exception as exc:
-            if floatip_id:
-                try:
-                    await acc.delete_floatingip(region, floatip_id)
-                except Exception:
-                    pass
-            await notify.live(
-                f"❌ [{code(short_time())}] {bold(acc.name)} "
-                f"[{code(region)}] — {esc(str(exc)[:120])}, "
-                f"жду {code(f'{ERROR_RETRY_SEC} с')}"
-            )
-            await asyncio.sleep(ERROR_RETRY_SEC)
+    # Все регионы — параллельно
+    region_tasks = [
+        asyncio.create_task(_try_region(acc, region))
+        for region in regions
+    ]
+    await asyncio.gather(*region_tasks, return_exceptions=True)
 
 
 # ─────────────────────────────────────────── main loop

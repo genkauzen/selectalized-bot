@@ -2,7 +2,7 @@ IAM_BASE = "https://cloud.api.selcloud.ru/identity/v3"
 BILLING_BASE = "https://api.selectel.ru"
 
 TOKEN_MAX_AGE = 20 * 3600       # refresh IAM token before 24-hour expiry
-ERROR_RETRY_SEC = 60            # wait after generic error
+ERROR_RETRY_SEC = 30            # wait after generic error
 RATE_LIMIT_RETRY_SEC = 1800     # wait after 429 / 503
 
 DEFAULT_REGIONS = ["ru-1", "ru-2", "ru-3", "ru-7", "ru-9"]
