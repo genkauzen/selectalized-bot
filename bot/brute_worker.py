@@ -79,6 +79,25 @@ async def _try_account(acc_data: Dict, regions: List[str]) -> None:
         if not await db.is_running():
             return
 
+        # Зачищаем зависшие floating IP перед созданием нового
+        try:
+            existing = await acc.list_floatingips(region)
+            # Не трогаем IP, которые уже сохранены в БД как найденные
+            found_ids = {row["floatip_id"] for row in await db.get_found_ips(limit=10000)}
+            stale = [f for f in existing if f["id"] not in found_ids]
+            if stale:
+                await notify.live(
+                    f"🧹 [{code(short_time())}] {bold(acc.name)} "
+                    f"[{code(region)}] — удаляю {code(str(len(stale)))} зависших IP"
+                )
+                for fip in stale:
+                    try:
+                        await acc.delete_floatingip(region, fip["id"])
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         await notify.live(
             f"🔍 [{code(short_time())}] {bold(acc.name)} "
             f"[{code(region)}] — создаю случайный IP…"
