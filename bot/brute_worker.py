@@ -26,11 +26,9 @@ logger = logging.getLogger(__name__)
 
 _worker_task: Optional[asyncio.Task] = None
 
-# Throttle notify.live spam: one message per key per interval
+# Throttle error notify.live spam: one message per key per interval
 _notify_ts: Dict[str, float] = {}
-MISS_THROTTLE = 30.0    # seconds between "мимо" logs per region
 ERROR_THROTTLE = 60.0   # seconds between error logs per region
-QUOTA_SLEEP = 10        # seconds to sleep after HTTP 400 (quota)
 
 
 def _can_notify(key: str, interval: float) -> bool:
@@ -89,11 +87,10 @@ async def _try_region(acc: SelectelAccount, region: str) -> None:
         else:
             await acc.delete_floatingip(region, floatip_id)
             floatip_id = None
-            if _can_notify(f"{acc.name}:{region}:miss", MISS_THROTTLE):
-                await notify.live(
-                    f"🔄 [{code(short_time())}] {bold(acc.name)} "
-                    f"[{code(region)}] — {code(ip_addr)} мимо"
-                )
+            await notify.live(
+                f"🔄 [{code(short_time())}] {bold(acc.name)} "
+                f"[{code(region)}] — {code(ip_addr)} мимо"
+            )
 
     except SelectelApiError as exc:
         if exc.is_rate_limit:
@@ -104,13 +101,12 @@ async def _try_region(acc: SelectelAccount, region: str) -> None:
                 )
             await asyncio.sleep(RATE_LIMIT_RETRY_SEC)
         elif exc.status == 400:
-            # Quota exceeded — stale cleanup runs at next iteration start
+            # Quota exceeded — stale cleanup runs at next iteration start; no sleep needed
             if _can_notify(f"{acc.name}:{region}:quota", ERROR_THROTTLE):
                 await notify.live(
                     f"⚠️ [{code(short_time())}] {bold(acc.name)} "
-                    f"[{code(region)}] — квота (HTTP 400), жду {code(f'{QUOTA_SLEEP} с')}"
+                    f"[{code(region)}] — квота (HTTP 400), зачищаю и пробую снова"
                 )
-            await asyncio.sleep(QUOTA_SLEEP)
         elif exc.is_permanent:
             if _can_notify(f"{acc.name}:{region}:perm", ERROR_THROTTLE):
                 await notify.live(
@@ -138,7 +134,7 @@ async def _try_region(acc: SelectelAccount, region: str) -> None:
                 await acc.delete_floatingip(region, floatip_id)
             except Exception:
                 pass
-        err_text = str(exc) or f"{type(exc).__name__}"
+        err_text = str(exc) or type(exc).__name__
         if _can_notify(f"{acc.name}:{region}:exc", ERROR_THROTTLE):
             await notify.live(
                 f"❌ [{code(short_time())}] {bold(acc.name)} "

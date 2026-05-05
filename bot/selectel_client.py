@@ -218,7 +218,7 @@ class SelectelAccount:
                 f"{base}/v2.0/networks",
                 params={"router:external": "true"},
                 headers={"X-Auth-Token": token},
-                timeout=aiohttp.ClientTimeout(total=20),
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 await _raise_for(resp)
                 data = await resp.json()
@@ -241,7 +241,7 @@ class SelectelAccount:
                 f"{base}/v2.0/subnets",
                 params={"network_id": ext_net},
                 headers={"X-Auth-Token": token},
-                timeout=aiohttp.ClientTimeout(total=20),
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 await _raise_for(resp)
                 body = await resp.json()
@@ -270,7 +270,7 @@ class SelectelAccount:
                 f"{base}/v2.0/floatingips",
                 json={"floatingip": fip_body},
                 headers={"X-Auth-Token": token},
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 await _raise_for(resp)
                 body = await resp.json()
@@ -286,7 +286,7 @@ class SelectelAccount:
             async with session.delete(
                 f"{base}/v2.0/floatingips/{floatip_id}",
                 headers={"X-Auth-Token": token},
-                timeout=aiohttp.ClientTimeout(total=20),
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status == 404:
                     return  # already gone, fine
@@ -301,7 +301,7 @@ class SelectelAccount:
             async with session.get(
                 f"{base}/v2.0/floatingips",
                 headers={"X-Auth-Token": token},
-                timeout=aiohttp.ClientTimeout(total=20),
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 await _raise_for(resp)
                 body = await resp.json()
