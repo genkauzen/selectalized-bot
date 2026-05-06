@@ -5,12 +5,13 @@ Authentication: API key is used directly as X-Auth-Token.
 Region: Moscow only (msk1).
 
 Floating IP lifecycle:
-  list   → GET    /v2.0/floatingips
-  create → POST   /v2.0/floatingips
+  create → POST   /v2.0/floatingips  (response may have floating_ip_address=null)
+  poll   → GET    /v2.0/floatingips/{id}  until floating_ip_address is set
   delete → DELETE /v2.0/floatingips/{id}
+  list   → GET    /v2.0/floatingips
 
-Note: floating IP allocation in reg.cloud can take significantly longer
-than other providers (up to 60 seconds per request).
+Note: reg.cloud allocates IPs asynchronously — the POST may return before
+the address is assigned. _poll_for_ip handles waiting for it to appear.
 """
 from __future__ import annotations
 
@@ -24,7 +25,9 @@ from .regru_constants import REGRU_NETWORK_BASE, REGRU_REGION
 
 logger = logging.getLogger(__name__)
 
-_CREATE_TIMEOUT = 90  # reg.cloud IP allocation is slow
+_POST_TIMEOUT = 30       # POST itself; address assignment happens async
+_POLL_INTERVAL = 5       # seconds between poll attempts
+_POLL_TIMEOUT = 180      # max seconds to wait for address to appear
 
 
 class RegRuApiError(Exception):
@@ -54,8 +57,7 @@ async def _raise_for(resp: aiohttp.ClientResponse) -> None:
 class RegRuAccount:
     """
     Wraps one reg.cloud account.
-
-    Only the API key is required — it is sent as X-Auth-Token.
+    Only API key required — sent as X-Auth-Token.
     """
 
     def __init__(self, name: str, api_key: str) -> None:
@@ -69,6 +71,31 @@ class RegRuAccount:
 
     def _headers(self) -> Dict[str, str]:
         return {"X-Auth-Token": self.api_key}
+
+    # ------------------------------------------------------------------ balance
+
+    async def get_balance(self) -> Optional[float]:
+        """
+        Try to retrieve account balance. Returns None if the endpoint
+        is unavailable or the response is unexpected.
+        """
+        try:
+            async with _make_session() as session:
+                async with session.get(
+                    f"{REGRU_NETWORK_BASE.replace('/network', '')}/billing/v1/balance",
+                    headers=self._headers(),
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+                    # Try common field names
+                    for key in ("balance", "amount", "money", "value"):
+                        if key in data:
+                            return float(data[key])
+                    return None
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------ networks
 
@@ -104,10 +131,41 @@ class RegRuAccount:
                 body = await resp.json()
                 return body.get("floatingips", [])
 
+    async def _poll_for_ip(self, fip_id: str) -> str:
+        """
+        Poll GET /floatingips/{id} until floating_ip_address is populated.
+        reg.cloud allocates the address asynchronously after the POST returns.
+        Raises RegRuApiError on timeout or if the resource disappears.
+        """
+        deadline = asyncio.get_event_loop().time() + _POLL_TIMEOUT
+        while True:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise RegRuApiError(
+                    0,
+                    f"Timeout: floating IP {fip_id} never got an address in {_POLL_TIMEOUT}s",
+                )
+            await asyncio.sleep(_POLL_INTERVAL)
+
+            async with _make_session() as session:
+                async with session.get(
+                    f"{REGRU_NETWORK_BASE}/v2.0/floatingips/{fip_id}",
+                    headers=self._headers(),
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as resp:
+                    if resp.status == 404:
+                        raise RegRuApiError(404, f"Floating IP {fip_id} disappeared during polling")
+                    await _raise_for(resp)
+                    body = await resp.json()
+                    ip = body.get("floatingip", {}).get("floating_ip_address")
+                    if ip:
+                        elapsed = _POLL_TIMEOUT - remaining
+                        logger.debug("RegRu: fip %s got IP %s after ~%.0fs", fip_id, ip, elapsed)
+                        return ip
+
     async def create_floatingip(self) -> Tuple[str, str]:
         """
-        Allocate a floating IPv4 in Moscow.
-        Note: reg.cloud IP allocation is slow — timeout is set to 90 s.
+        Request a floating IPv4 in Moscow, then wait until the address appears.
 
         Returns:
             (ip_address, floatip_id)
@@ -119,12 +177,19 @@ class RegRuAccount:
                 f"{REGRU_NETWORK_BASE}/v2.0/floatingips",
                 json={"floatingip": {"floating_network_id": ext_net}},
                 headers=self._headers(),
-                timeout=aiohttp.ClientTimeout(total=_CREATE_TIMEOUT),
+                timeout=aiohttp.ClientTimeout(total=_POST_TIMEOUT),
             ) as resp:
                 await _raise_for(resp)
                 body = await resp.json()
                 fip = body["floatingip"]
-                return fip["floating_ip_address"], fip["id"]
+                fip_id = fip["id"]
+                ip: Optional[str] = fip.get("floating_ip_address")
+
+        if not ip:
+            # Address is assigned asynchronously — poll until it appears
+            ip = await self._poll_for_ip(fip_id)
+
+        return ip, fip_id
 
     async def delete_floatingip(self, floatip_id: str) -> None:
         async with _make_session() as session:

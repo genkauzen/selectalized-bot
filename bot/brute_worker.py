@@ -264,12 +264,12 @@ async def _worker_loop() -> None:
 
 # ─────────────────────────────────────────── Reg.cloud worker
 
-async def _try_regru_account(acc: RegRuAccount) -> None:
-    """One iteration for a single reg.cloud account (Moscow region only)."""
-    if not await db.is_regru_running():
-        return
+# Pause between iterations after a miss (delete was fast, don't spam API)
+REGRU_ITER_PAUSE = 5  # seconds
 
-    floatip_id: Optional[str] = None
+
+async def _regru_cleanup(acc: RegRuAccount) -> None:
+    """Delete all floating IPs that aren't in our found list."""
     try:
         existing = await acc.list_floatingips()
         found_ids = {row["floatip_id"] for row in await db.get_regru_found_ips(limit=10000)}
@@ -287,10 +287,19 @@ async def _try_regru_account(acc: RegRuAccount) -> None:
     except Exception:
         pass
 
+
+async def _regru_one_iteration(acc: RegRuAccount) -> bool:
+    """
+    One create→wait→check→delete cycle for a reg.cloud account.
+
+    Returns True if a matching IP was found (loop should pause longer),
+    False on miss or error.
+    """
+    floatip_id: Optional[str] = None
     try:
         await notify.live(
             f"⏳ [{code(short_time())}] [RegRu] {bold(acc.name)} "
-            f"[{code(REGRU_REGION)}] — создаю IP (это занимает время…)"
+            f"[{code(REGRU_REGION)}] — создаю IP, жду назначения адреса…"
         )
         ip_addr, floatip_id = await acc.create_floatingip()
 
@@ -312,6 +321,7 @@ async def _try_regru_account(acc: RegRuAccount) -> None:
             await notify.logs(found_msg)
             await notify.alert(found_msg)
             await db.add_regru_found_ip(acc.name, REGRU_REGION, ip_addr, floatip_id, subnet)
+            return True
         else:
             await acc.delete_floatingip(floatip_id)
             floatip_id = None
@@ -319,8 +329,14 @@ async def _try_regru_account(acc: RegRuAccount) -> None:
                 f"🔄 [{code(short_time())}] [RegRu] {bold(acc.name)} "
                 f"[{code(REGRU_REGION)}] — {code(ip_addr)} мимо"
             )
+            return False
 
     except RegRuApiError as exc:
+        if floatip_id:
+            try:
+                await acc.delete_floatingip(floatip_id)
+            except Exception:
+                pass
         if exc.is_rate_limit:
             if _can_notify(f"regru:{acc.name}:ratelimit", REGRU_RATE_LIMIT_RETRY_SEC):
                 await notify.live(
@@ -332,20 +348,23 @@ async def _try_regru_account(acc: RegRuAccount) -> None:
             if _can_notify(f"regru:{acc.name}:quota", ERROR_THROTTLE):
                 await notify.live(
                     f"⚠️ [{code(short_time())}] [RegRu] {bold(acc.name)} "
-                    f"— квота (HTTP 400), зачищаю и пробую снова"
+                    f"— квота (HTTP 400), зачищаю зависшие IP"
                 )
+            await _regru_cleanup(acc)
         elif exc.is_permanent:
             if _can_notify(f"regru:{acc.name}:perm", ERROR_THROTTLE):
                 await notify.live(
                     f"⛔ [{code(short_time())}] [RegRu] {bold(acc.name)} "
-                    f"— HTTP {exc.status}, пропускаю аккаунт"
+                    f"— HTTP {exc.status}, пропускаю"
                 )
+            await asyncio.sleep(REGRU_ERROR_RETRY_SEC)
         else:
             if _can_notify(f"regru:{acc.name}:err", ERROR_THROTTLE):
                 await notify.live(
                     f"❌ [{code(short_time())}] [RegRu] {bold(acc.name)} "
-                    f"— HTTP {exc.status}, пропускаю"
+                    f"— HTTP {exc.status}: {esc(exc.body[:80])}"
                 )
+        return False
 
     except asyncio.CancelledError:
         if floatip_id:
@@ -365,8 +384,31 @@ async def _try_regru_account(acc: RegRuAccount) -> None:
         if _can_notify(f"regru:{acc.name}:exc", ERROR_THROTTLE):
             await notify.live(
                 f"❌ [{code(short_time())}] [RegRu] {bold(acc.name)} "
-                f"— {esc(err_text[:120])}, пропускаю"
+                f"— {esc(err_text[:120])}"
             )
+        return False
+
+
+async def _regru_account_loop(name: str, api_key: str) -> None:
+    """
+    Persistent per-account loop for reg.cloud.
+
+    Runs: cleanup → create → wait for IP → compare → delete if miss → pause → repeat.
+    Non-aggressive: natural pacing comes from IP allocation time (30–180s each).
+    An extra short pause after each miss prevents hammering the API on fast errors.
+    """
+    acc = RegRuAccount(name=name, api_key=api_key)
+    await _regru_cleanup(acc)
+
+    while True:
+        if not await db.is_regru_running():
+            await asyncio.sleep(3)
+            continue
+
+        hit = await _regru_one_iteration(acc)
+        if not hit:
+            # Short pause after a miss or error so we don't hammer the API
+            await asyncio.sleep(REGRU_ITER_PAUSE)
 
 
 async def _regru_worker_loop() -> None:
@@ -375,40 +417,58 @@ async def _regru_worker_loop() -> None:
         f"{SEP}\n"
         f"Регион       : {code(REGRU_REGION)} (Москва)\n"
         f"Одновременно : {code(str(config.regru_atmoment_acc))} акк.\n"
-        f"⚠️ IP-адреса в reg.cloud создаются дольше обычного"
+        f"Режим        : неагрессивный (IP создаются долго, ждём назначения)"
     )
 
-    while True:
-        try:
+    # account_name → running Task
+    account_tasks: Dict[str, asyncio.Task] = {}
+
+    try:
+        while True:
             if not await db.is_regru_running():
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
                 continue
 
             accounts = await db.get_enabled_regru_accounts()
             if not accounts:
-                await notify.live(
-                    f"⚠️ [{code(short_time())}] [RegRu] Нет аккаунтов — "
-                    f"добавьте через {code('/regrkadd')}"
-                )
+                if not account_tasks:
+                    await notify.live(
+                        f"⚠️ [{code(short_time())}] [RegRu] Нет аккаунтов — "
+                        f"добавьте через {code('/regrkadd')}"
+                    )
                 await asyncio.sleep(30)
                 continue
 
-            batch = accounts[: config.regru_atmoment_acc]
-            accs = [RegRuAccount(name=a["name"], api_key=a["api_key"]) for a in batch]
-            tasks = [asyncio.create_task(_try_regru_account(acc)) for acc in accs]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            active = {a["name"]: a for a in accounts[: config.regru_atmoment_acc]}
 
-        except asyncio.CancelledError:
-            break
-        except Exception as exc:
-            logger.exception("RegRu worker loop unhandled error")
-            await notify.logs(
-                f"❌ {bold('[RegRu] Критическая ошибка воркера')}: {esc(str(exc)[:200])}\n"
-                f"Перезапуск через {REGRU_ERROR_RETRY_SEC} с…"
-            )
-            await asyncio.sleep(REGRU_ERROR_RETRY_SEC)
+            # Cancel tasks for accounts no longer in the active set
+            for acc_name in list(account_tasks):
+                if acc_name not in active or account_tasks[acc_name].done():
+                    if not account_tasks[acc_name].done():
+                        account_tasks[acc_name].cancel()
+                    del account_tasks[acc_name]
 
-    await notify.logs(f"⏹ {bold('[Reg.cloud] Перебор остановлен')}")
+            # Spawn tasks for new accounts
+            for acc_name, acc_data in active.items():
+                if acc_name not in account_tasks or account_tasks[acc_name].done():
+                    account_tasks[acc_name] = asyncio.create_task(
+                        _regru_account_loop(acc_data["name"], acc_data["api_key"])
+                    )
+
+            # Refresh account list every 15 s
+            await asyncio.sleep(15)
+
+    except asyncio.CancelledError:
+        for task in account_tasks.values():
+            task.cancel()
+        await asyncio.gather(*account_tasks.values(), return_exceptions=True)
+    except Exception as exc:
+        logger.exception("RegRu worker loop unhandled error")
+        await notify.logs(
+            f"❌ {bold('[RegRu] Критическая ошибка воркера')}: {esc(str(exc)[:200])}"
+        )
+    finally:
+        await notify.logs(f"⏹ {bold('[Reg.cloud] Перебор остановлен')}")
 
 
 # ─────────────────────────────────────────── public API

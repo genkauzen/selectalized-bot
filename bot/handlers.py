@@ -30,7 +30,9 @@ from aiogram.types import Message
 from . import brute_worker, db, notify
 from .config import config
 from .ip_pool import WHITELIST_CIDRS
+from .regru_client import RegRuAccount
 from .regru_constants import REGRU_REGION, REGRU_WHITELIST_CIDRS
+from .selectel_client import SelectelAccount
 from .tg_format import SEP, bold, code, esc, italic, now_str, short_time
 
 router = Router()
@@ -105,11 +107,26 @@ async def cmd_selecteladd(msg: Message) -> None:
         else ""
     )
 
+    # Fetch balance right after saving
+    balance_line = ""
+    if api_key:
+        acc_obj = SelectelAccount(
+            name=name,
+            sa_login=sa_login,
+            sa_pass=sa_pass,
+            project_id=project_id,
+            acc_login=acc_login,
+            api_key=api_key,
+        )
+        balance = await acc_obj.get_balance()
+        balance_line = f"\nБаланс : {code(f'{balance:.2f} ₽')}"
+
     await msg.reply(
         f"✅ {bold('Аккаунт сохранён')}\n"
         f"{SEP}\n"
         f"Имя    : {code(name)}\n"
         f"Режим  : {code('полный' if mode == 'full' else 'billing only')}"
+        f"{balance_line}"
         f"{warn}",
         parse_mode="HTML",
     )
@@ -161,11 +178,19 @@ async def cmd_regrkadd(msg: Message) -> None:
         await msg.reply("❌ Ошибка записи в базу данных", parse_mode="HTML")
         return
 
+    # Fetch balance right after saving
+    rgr_acc = RegRuAccount(name=name, api_key=api_key)
+    balance = await rgr_acc.get_balance()
+    balance_line = (
+        f"\nБаланс : {code(f'{balance:.2f} ₽')}" if balance is not None else ""
+    )
+
     await msg.reply(
         f"✅ {bold('Reg.cloud аккаунт сохранён')}\n"
         f"{SEP}\n"
         f"Имя    : {code(name)}\n"
-        f"Регион : {code(REGRU_REGION)} (Москва)",
+        f"Регион : {code(REGRU_REGION)} (Москва)"
+        f"{balance_line}",
         parse_mode="HTML",
     )
     await notify.logs(
