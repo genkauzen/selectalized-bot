@@ -18,6 +18,8 @@ import logging
 import time
 from typing import Dict, List, Optional
 
+import aiohttp
+
 from . import db, notify
 from .config import config
 from .ip_pool import (
@@ -288,6 +290,9 @@ async def _regru_cleanup(acc: RegRuAccount) -> None:
         pass
 
 
+_NET_ERROR_RETRY_SEC = 60  # longer backoff on DNS/connection failures
+
+
 async def _regru_one_iteration(acc: RegRuAccount) -> bool:
     """
     One create→wait→check→delete cycle for a reg.cloud account.
@@ -299,9 +304,15 @@ async def _regru_one_iteration(acc: RegRuAccount) -> bool:
     try:
         await notify.live(
             f"⏳ [{code(short_time())}] [RegRu] {bold(acc.name)} "
-            f"[{code(REGRU_REGION)}] — создаю IP, жду назначения адреса…"
+            f"[{code(REGRU_REGION)}] — создаю IP…"
         )
-        ip_addr, floatip_id = await acc.create_floatingip()
+        floatip_id, ip_addr = await acc.post_floatingip()
+        if not ip_addr:
+            await notify.live(
+                f"⏳ [{code(short_time())}] [RegRu] {bold(acc.name)} "
+                f"[{code(REGRU_REGION)}] — жду назначения адреса…"
+            )
+            ip_addr = await acc.poll_for_ip(floatip_id)
 
         if regru_ip_in_whitelist(ip_addr):
             subnet = regru_get_matching_subnet(ip_addr) or "?"
@@ -381,11 +392,17 @@ async def _regru_one_iteration(acc: RegRuAccount) -> bool:
             except Exception:
                 pass
         err_text = str(exc) or type(exc).__name__
-        if _can_notify(f"regru:{acc.name}:exc", ERROR_THROTTLE):
+        # Network/DNS errors: show more often and wait longer before retry
+        is_net_err = isinstance(exc, (aiohttp.ClientError, OSError))
+        throttle_key = f"regru:{acc.name}:{'net' if is_net_err else 'exc'}"
+        throttle_sec = 30.0 if is_net_err else ERROR_THROTTLE
+        if _can_notify(throttle_key, throttle_sec):
             await notify.live(
                 f"❌ [{code(short_time())}] [RegRu] {bold(acc.name)} "
                 f"— {esc(err_text[:120])}"
             )
+        if is_net_err:
+            await asyncio.sleep(_NET_ERROR_RETRY_SEC)
         return False
 
 

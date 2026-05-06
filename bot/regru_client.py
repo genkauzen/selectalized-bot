@@ -163,12 +163,12 @@ class RegRuAccount:
                         logger.debug("RegRu: fip %s got IP %s after ~%.0fs", fip_id, ip, elapsed)
                         return ip
 
-    async def create_floatingip(self) -> Tuple[str, str]:
+    async def post_floatingip(self) -> Tuple[str, Optional[str]]:
         """
-        Request a floating IPv4 in Moscow, then wait until the address appears.
+        POST the create request only.
 
         Returns:
-            (ip_address, floatip_id)
+            (floatip_id, ip_address_or_None)
         """
         ext_net = await self._external_network()
 
@@ -182,13 +182,16 @@ class RegRuAccount:
                 await _raise_for(resp)
                 body = await resp.json()
                 fip = body["floatingip"]
-                fip_id = fip["id"]
-                ip: Optional[str] = fip.get("floating_ip_address")
+                return fip["id"], fip.get("floating_ip_address")
 
+    async def poll_for_ip(self, fip_id: str) -> str:
+        return await self._poll_for_ip(fip_id)
+
+    async def create_floatingip(self) -> Tuple[str, str]:
+        """POST + poll until address. Returns (ip_address, floatip_id)."""
+        fip_id, ip = await self.post_floatingip()
         if not ip:
-            # Address is assigned asynchronously — poll until it appears
             ip = await self._poll_for_ip(fip_id)
-
         return ip, fip_id
 
     async def delete_floatingip(self, floatip_id: str) -> None:
