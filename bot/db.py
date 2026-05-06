@@ -33,7 +33,26 @@ CREATE TABLE IF NOT EXISTS found_ips (
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS regru_accounts (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT    UNIQUE NOT NULL,
+    api_key    TEXT    NOT NULL DEFAULT '',
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS regru_found_ips (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_name TEXT NOT NULL,
+    region       TEXT NOT NULL DEFAULT 'msk1',
+    ip           TEXT NOT NULL,
+    floatip_id   TEXT NOT NULL DEFAULT '',
+    subnet       TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 INSERT OR IGNORE INTO bot_state (key, value) VALUES ('running', '0');
+INSERT OR IGNORE INTO bot_state (key, value) VALUES ('regru_running', '0');
 """
 
 
@@ -169,5 +188,80 @@ async def get_found_ips(limit: int = 20) -> List[Dict]:
 async def count_found_ips() -> int:
     async with aiosqlite.connect(_db_path()) as db:
         async with db.execute("SELECT COUNT(*) FROM found_ips") as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
+# ──────────────────────────────────────── Reg.cloud accounts
+
+async def upsert_regru_account(name: str, api_key: str) -> bool:
+    try:
+        async with aiosqlite.connect(_db_path()) as db:
+            await db.execute(
+                """
+                INSERT INTO regru_accounts (name, api_key)
+                VALUES (?, ?)
+                ON CONFLICT(name) DO UPDATE SET api_key = excluded.api_key
+                """,
+                (name, api_key),
+            )
+            await db.commit()
+        return True
+    except Exception:
+        return False
+
+
+async def get_enabled_regru_accounts() -> List[Dict]:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM regru_accounts WHERE enabled = 1 AND api_key != '' ORDER BY id"
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_all_regru_accounts() -> List[Dict]:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM regru_accounts ORDER BY id") as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def is_regru_running() -> bool:
+    return await get_state("regru_running") == "1"
+
+
+# ──────────────────────────────────────── Reg.cloud found IPs
+
+async def add_regru_found_ip(
+    account_name: str,
+    region: str,
+    ip: str,
+    floatip_id: str,
+    subnet: str,
+) -> None:
+    async with aiosqlite.connect(_db_path()) as db:
+        await db.execute(
+            """
+            INSERT INTO regru_found_ips (account_name, region, ip, floatip_id, subnet)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (account_name, region, ip, floatip_id, subnet),
+        )
+        await db.commit()
+
+
+async def get_regru_found_ips(limit: int = 20) -> List[Dict]:
+    async with aiosqlite.connect(_db_path()) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM regru_found_ips ORDER BY id DESC LIMIT ?", (limit,)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def count_regru_found_ips() -> int:
+    async with aiosqlite.connect(_db_path()) as db:
+        async with db.execute("SELECT COUNT(*) FROM regru_found_ips") as cur:
             row = await cur.fetchone()
             return row[0] if row else 0

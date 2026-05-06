@@ -22,11 +22,22 @@ async def _on_startup(bot: Bot) -> None:
     await db.init_db()
     notify.set_bot(bot)
 
-    # If the worker was running before restart, resume automatically
-    if await db.is_running():
+    sel_resumed = await db.is_running()
+    rgr_resumed = await db.is_regru_running()
+
+    if sel_resumed:
         await brute_worker.start_worker()
+    if rgr_resumed:
+        await brute_worker.start_regru_worker()
+
+    if sel_resumed or rgr_resumed:
+        parts = []
+        if sel_resumed:
+            parts.append("Selectel")
+        if rgr_resumed:
+            parts.append("Reg.cloud")
         await notify.logs(
-            f"♻️ {bold('Бот перезапущен')} — перебор возобновлён"
+            f"♻️ {bold('Бот перезапущен')} — перебор возобновлён ({', '.join(parts)})"
         )
     else:
         await notify.logs(
@@ -39,6 +50,7 @@ async def _on_startup(bot: Bot) -> None:
 
 async def _on_shutdown(bot: Bot) -> None:
     await brute_worker.stop_worker()
+    await brute_worker.stop_regru_worker()
     logger.info("Shutdown complete")
 
 

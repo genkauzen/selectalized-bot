@@ -27,7 +27,7 @@ async def _send(topic_id: int, text: str) -> None:
     try:
         await _bot.send_message(
             chat_id=config.group_id,
-            message_thread_id=topic_id if topic_id else None,
+            message_thread_id=topic_id if topic_id > 0 else None,
             text=text,
             parse_mode="HTML",
             disable_web_page_preview=True,
@@ -46,3 +46,8 @@ async def logs(text: str) -> None:
 async def live(text: str) -> None:
     """Send to the live-process topic."""
     await _send(config.topic_id_live, text)
+
+
+async def alert(text: str) -> None:
+    """Send to the main group chat (no topic thread) — used for found IPs."""
+    await _send(0, text)

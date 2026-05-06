@@ -71,6 +71,11 @@ class Config:
         default_factory=lambda: _float("SELECTEL_MINIMUM_RUBLES", 0.0)
     )
 
+    # Reg.cloud (reg.ru)
+    regru_atmoment_acc: int = field(
+        default_factory=lambda: max(1, _int("REGRU_ATMOMENT_ACC", 2))
+    )
+
     # Paths
     data_dir: str = field(default_factory=lambda: _str("DATA_DIR", "/app/data"))
 

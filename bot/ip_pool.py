@@ -1,7 +1,8 @@
 import ipaddress
 from typing import Dict, Iterator, List, Optional
 
-# Whitelist subnets — floating IPs in these ranges are considered "good"
+# ──────────────────────────────────────── Selectel whitelist
+# Floating IPs in these ranges are considered "good" for Selectel accounts.
 WHITELIST_CIDRS: List[str] = [
     "109.71.12.0/24",
     "109.71.13.0/24",
@@ -68,6 +69,35 @@ def get_matching_subnet(ip_str: str) -> Optional[str]:
     try:
         addr = ipaddress.ip_address(ip_str)
         for net in _NETWORKS:
+            if addr in net:
+                return str(net)
+    except ValueError:
+        pass
+    return None
+
+
+# ──────────────────────────────────────── Reg.cloud (reg.ru) whitelist
+# Target subnets for reg.cloud Moscow floating IPs.
+# These are loaded from regru_constants to keep configuration in one place.
+from .regru_constants import REGRU_WHITELIST_CIDRS  # noqa: E402
+
+_REGRU_NETWORKS = [ipaddress.ip_network(cidr, strict=False) for cidr in REGRU_WHITELIST_CIDRS]
+
+
+def regru_ip_in_whitelist(ip_str: str) -> bool:
+    """Return True if the given IPv4 falls inside a reg.cloud target subnet."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+        return any(addr in net for net in _REGRU_NETWORKS)
+    except ValueError:
+        return False
+
+
+def regru_get_matching_subnet(ip_str: str) -> Optional[str]:
+    """Return the CIDR of the first reg.cloud target subnet containing the IP."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+        for net in _REGRU_NETWORKS:
             if addr in net:
                 return str(net)
     except ValueError:
